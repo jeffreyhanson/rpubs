@@ -1,0 +1,389 @@
+---
+title: "Generating subgraphs in R"
+author: Jeffrey O. Hanson
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    toc: false
+    fig_caption: yes
+    self_contained: yes
+fontsize: 11pt
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(fig.align = "center")
+```
+
+**This is still in progress.**
+
+## Introduction
+
+Graphs---no, I don't mean plots---are used for representing network data. They are composed of nodes and edges. Nodes represent "things" and edges represent the connections between them. For example, consider a social network. Here, nodes might represent people and edges might delineate which people are connected to other people. But graphs can be so much more. They can be used to represent the spread of infectious diseases, predator-prey relationships in an ecosystem, or even consumer purchases in an online marketplace.
+
+Let us assume that---with no less of generality---I have convinced you that graphs are important. So, now we will consider a problem that you may encounter when manipulating a graph. You have a graph. This graph has an arbitrary number of nodes and an arbitrary number of edges. Now, you want all possible contiguous subgraphs---subsets of the graph that are connected---that contain a certain number of nodes. For example, you might have a graph with 25 nodes arranged in a grid with edges between adjacent nodes. Given this problem, you would like all possible contiguous subgraphs with five nodes. This problem specification is intentionally vague and thus precludes any solutions that involve known geometries of the subgraph.
+
+As you might have guessed, this is not an easy problem to solve. Previous work, [by the most excellent Benjamin Ortiz Ulloa tackled this problem by iterating over the desired number of nodes using a series of database joins](https://gist.github.com/beemyfriend/a2a721a3ab608418418afa0cc516e965). However, this solution does not scale well for graphs with thousands of nodes (anecdotally, a graph with 10'000 nodes arranged in a grid requires 30 minutes to complete). Therefore I sought another solution. My approach to solving computational problems generally involves finding algorithms or programs that have been developed by individuals much smarter than myself and applying them to my particular problem. Since Benjamin suggested that this type of problem could potentially be solved using [Apache Tinkerpop using the Gremlin graph traversal language](http://tinkerpop.apache.org/), I gave it a whirl. Here I show that we can find all subgraphs with 5 nodes in a graph containing 100'000 nodes in **under four minutes** by calling Apache Tinkerpop from within R.
+
+## Methods
+
+Here we will use the [_igraph R_ package](http://igraph.org/r/) for manipulating graphs. Let's load this package and several other packages that will make our lives easier. Since we'll be making some animated gifs, we will also set some default behaviors when making gifs.
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+# load packages
+library(dplyr)          # dat pipe operator and manipulate tabular data
+library(igraph)         # manipulate graph data
+library(assertthat)     # validate data
+library(animation)      # make pretty animations
+library(bench)          # perform benchmark analysis
+library(data.table)     # parse subgraph data quickly
+library(ggplot2)        # create pretty graphs
+
+# set global options
+ani.options(interval = 0.1) # set animation interval
+```
+
+Since this method involves using [Gremlin console](http://tinkerpop.apache.org/docs/current/tutorials/the-gremlin-console/) to interface with Apache Tinkerpop, we will define some convenience functions to help us execute Gremlin commands from when our R session. Please note that you will need to install these programs yourself. Fortunately, there are some guides available for getting started (e.g. https://github.com/tinkerpop/gremlin/wiki/Getting-Started). After installing the Gremlin console, you will need to edit your `$PATH` variable so that we can call the Gremlin console at will. For example, I have a line in my `~/.bashrc` file with the following commands: `export GREMLIN_HOME="/opt/apache-tinkerpop-gremlin-console-3.3.3";export PATH="${PATH}:${GREMLIN_HOME}/bin;"` because I installed the program in `/opt`.
+`.
+
+```{r}
+#' Gremlin console script
+#'
+#' This function returns the file name to call the Gremlin console.
+#'
+#' @return \code{character} name of file.
+gremlin_console <- function() {
+  ext <- ifelse(.Platform$OS.type == "unix", "sh", "bat")
+  paste0("gremlin.", ext)
+}
+
+#' Is Gremlin installed?
+#'
+#' This function determines if Gremlin is installed on a computer.
+#'
+#' @return \code{logical} indicating if Gremlin is installed.
+is_gremlin_installed <- function() {
+  !inherits(system(paste0(gremlin_console(), " --version"), intern = TRUE),
+                          "try-error")
+}
+```
+
+We can test if Gremlin is installed on your computer by running the following command in your R session.
+
+```{r}
+## check if gremlin is installed
+is_gremlin_installed()
+```
+
+Now we will define a function to retrieve all possible subgraphs that contain a set number of nodes from a graph.
+
+```{r}
+#' Subgraphs
+#'
+#' Find all possible contiguous subgraphs that contain a set number of nodes
+#' from a given graph.
+#'
+#' @param x \code{\link[igraph]{igraph}} object.
+#'
+#' @param number_nodes \code{integer} number of nodes required in the
+#'   subgraphs. This number must be finite and be larger than or equal to
+#'   one.
+#'
+#' @details Please note that this function requires Apache Tinkerpop to be
+#'    installed and the Gremlin console to be callable from the command line.
+#'    Also note that duplicate subgraphs are not returned. This means that
+#'    \code{[1->2->3]} is treated the same as \code{[3->2->1]} and only
+#'    one of these two subgraphs would be returned.
+#'
+#' @return \code{list} of \code{\link[igraph]{igraph}} objects.
+find_subgraphs <- function(x, number_nodes) {
+  ### validate arguments
+  assertthat::assert_that(inherits(x, "igraph"),
+                          assertthat::is.count(number_nodes),
+                          assertthat::noNA(number_nodes),
+                          isTRUE(number_nodes <= igraph::vcount(x)),
+                          is_gremlin_installed())
+  ## create temporary files
+  cmd_file <- tempfile(fileext = ".txt")
+  data_file <- tempfile(fileext = ".xml")
+  result_file <- tempfile(fileext = ".txt")
+  ### add id attribute
+  igraph::V(x)$id <- seq_len(igraph::vcount(x))
+  ### sink graph to file
+  igraph::write_graph(x, data_file, "graphml")
+  ### save Gremlin commands to file
+  cat(file = cmd_file, paste0("
+// read data
+graph = TinkerGraph.open()
+graph.io(graphml()).readGraph('", data_file, "')
+// create graph traversal
+g = graph.traversal()
+// save output
+new FileOutputStream('", result_file, "').withWriter{
+  f -> g.V().repeat(both().simplePath()).times(", number_nodes - 1, ").path().
+       local(unfold().values('id').order().fold()).dedup().
+       //filter(count(local).is(eq(", number_nodes, "))).
+       sideEffect{f << \"${it}\"}.iterate()}
+"))
+  ## run gremlin command
+  system(paste(gremlin_console(), "-e", cmd_file))
+  assertthat::assert_that(file.exists(result_file),
+                          msg = "running Gremlin query failed.")
+  ## parse results
+  results <- suppressWarnings(readLines(result_file)) # read raw output
+  if (nchar(results) == 0 || results == "[]")
+    stop("no valid subgraphs")
+  results <- substr(results, 2,
+                    nchar(results) - 1) # omit 1st and last characters
+  results <- gsub("][", "\n", results, fixed = TRUE) # hack convert to csv
+  results <- paste0(results, "\n") # add trailing new line
+  results <- data.table::fread(results, data.table = FALSE, header = FALSE)
+  results <- as.data.frame(t(results))
+  ## delete temporary files
+  unlink(cmd_file)
+  unlink(data_file)
+  unlink(result_file)
+  ## return results
+  unname(lapply(results, igraph::induced_subgraph, graph = x))
+}
+```
+
+# Results
+
+## Verification
+
+Let us verify that this function actually works. Here, we will run the function over a small graph with a specific structure so that we can visually assess if the result is correct. Specifically, we will create a graph with 4 nodes arranged in a line (i.e. `1->2->3->4`) and use the function to find all possible contiguous subgraphs with 3 nodes. The correct answer is `1->2->3` and `2->3->4` excluding duplicate reversals (e.g. `4->3->2`).
+
+```{r}
+# create graph
+g <- graph_from_edgelist(matrix(c(1, 2, 2, 3, 3, 4), ncol = 2, byrow = TRUE))
+
+# print graph
+print(g)
+
+# plot graph
+plot(g)
+```
+
+```{r}
+# find all subgraphs with three nodes
+sg <- find_subgraphs(g, number_nodes = 3)
+
+# print output ids
+print(lapply(sg, function(x) V(x)$id))
+```
+
+```{r a1, fig.show="animate", fig.width=4, fig.height=4, cache=FALSE, interval=0.5, aniopts="loop,autoplay,controls"}
+  g_layout <- layout_nicely(g) # create layout for g
+  for (i in seq_along(sg)) {
+  plot(g, layout = g_layout,
+       vertex.color = ifelse(seq_len(vcount(g)) %in% V(sg[[i]])$id,
+                             "#bae4b3",  "#071E22"),
+           main = paste("All subgraphs with 3 nodes"))
+}
+```
+
+From these plots, we can see that the function returns the expected output. Therefore we have some level of confidence that the function might actually work. I will leave the mathematical proofs to you, dear reader.
+
+## Contrived case-study
+
+By this point you might be wondering if this function is actually useful. So let's try our hand at solving a **real world problem** (tm). Let's say you were in charge of managing threatened species in North Carolina. Today, you are tasked with deciding where to introduce captive bred populations of a threatened species. You have one hundred counties to choose from and you can only introduce populations into five counties. This problem is further complicated by the fact that (1) each county has a different amount of suitable habitat for the threatened species and (2) you need to select counties that form a single contiguous unit---that is they all form a single connected mass---to maintain connectivity between reintroduced populations. Now, you could choose to express this as an integer programming problem (perhaps using the [`<div class="shameless-self-plug">prioritizr Rpackage</div>`](https://prioritizr.net)) and solve it---but you would need access to a commercial integer programming problem solver which would cost you about $10'000 because in this scenario you are not affiliated with a university. **Please note that this example is provided purely for teaching purposes and threatened species conservation is actually far more complex then presented here and this work should not be used to guide any real-world conservation activities.**
+
+To solve this problem, we will first load packages for working with spatial data and import the data delineating the extent of each country.
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+# load packages for case-study
+library(sf)          # manipulating spatial vector data
+library(raster)      # manipulating spatial raster data
+library(fasterize)   # quickly rasterize spatial vector data
+
+# load North Carolina county data
+nc <- system.file("shape/nc.shp", package = "sf") %>%
+      read_sf() %>%
+      st_transform(3785) # convert to mercator
+```
+
+```{r}
+# plot county borders
+plot(st_geometry(nc), col = "grey20", main = "North Carolina counties")
+```
+
+Now we will download some land cover data so we can determine how much suitable habitat is available in each county for our pretend threatened species. To make our lives easier, we will just use a pre-compiled land cover data set provided by the Global Land Cover Facility. Here each pixel value corresponds to a different land cover class.
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+# download land cover data if doesn't exist
+# see Global Land Cover Facility for more info: http://glcf.umd.edu/data/lc/
+if (!file.exists("lc.tif")) {
+  download.file(paste0("ftp://ftp.glcf.umd.edu/glcf/Global_LNDCVR/UMD_TILES/",
+                       "Version_5.1/2012.01.01/MCD12Q1_V51_LC1.2012.TS1718/",
+                       "MCD12Q1_V51_LC1.2012.TS1718.tif.gz"), "lc.tif.gz")
+  # decompress data
+  R.utils::gunzip("lc.tif.gz")
+}
+```
+
+```{r}
+# load land cover data
+lc_data <- raster("lc.tif")
+
+# crop land cover data to study area
+lc_data <- crop(lc_data, nc %>%
+                         as("Spatial") %>%
+                         spTransform(lc_data@crs) %>%
+                         extent())
+
+# project land cover data to mercator
+lc_data <- projectRaster(lc_data, crs = CRS("+init=epsg:3785"), method = "ngb")
+
+# plot land cover data
+plot(lc_data, main = "Land cover data",
+     addfun = function() {plot(as(nc, "Spatial"), add = TRUE)})
+```
+
+After downloading the data, we will reclassify the data to binary values indicating which areas contain suitable habitat for our pretend threatened species.
+
+```{r}
+# manually reclassify land cover data to binary values indicating habitat
+habitat_data <- Which(lc_data >= 1 & lc_data <= 11, na.rm = FALSE)
+
+# plot habitat data
+plot(habitat_data, main = "Suitable habitat",
+     addfun = function() {plot(as(nc, "Spatial"), add = TRUE)})
+```
+
+Next we will calculate the total amount of suitable habitat in each county.
+
+```{r}
+# calculate total amount of forest in each county in North Carolina in 2012
+# note that we use fasterize to speed up calculations
+nc$habitat_amount <- sapply(seq_len(nrow(nc)),
+                            function(i) cellStats(fasterize(nc[i, ],
+                                                            habitat_data) *
+                                                  habitat_data,
+                                                  "sum"))
+
+# plot amount of habitat in each county
+plot(nc[, "habitat_amount"], main = "Amount of habitat")
+```
+
+Now that we have assembled the data we can begin solving the problem using graphs. First, we will create showing which counties are adjacent to each other. Here nodes will represent counties and edges will represent which counties are adjacent to each other.
+
+```{r, results = "hide", message = FALSE, warning = FALSE, fig.width = 6, fig.height = 2}
+# make graph using county data
+nc_graph <- graph_from_adjacency_matrix(as.matrix(st_touches(nc)))
+V(nc_graph)$name <- nc$NAME
+V(nc_graph)$habitat_amount <- nc$habitat_amount
+
+# create layout for plotting the graph
+nc_layout <- nc %>%
+             st_centroid() %>%
+             as("Spatial") %>%
+             slot("coords") %>%
+             layout.norm()
+```
+
+```{r}
+# plot graph
+plot(nc_graph, layout = nc_layout, main = "Counties as graph",
+     node.labels = V(nc_graph)$name)
+```
+
+Next we can use the `find_subgraphs` function to find all possible combinations of five counties that are connected to each other.
+
+```{r}
+# find all contiguous subgraphs with five nodes
+nc_subgraphs <- find_subgraphs(nc_graph, number_nodes = 5)
+```
+
+Finally, we can calculate the total amount of habitat encompassed by each set of five counties. After doing this, our solution will be the set of contiguous counties with the largest total amount of habitat.
+
+```{r}
+# calculate total amount of habitat in each subgraph
+nc_subgraphs_habitat <- sapply(nc_subgraphs,
+                               function(x) sum(V(x)$habitat_amount))
+
+# plot a histogram
+hist(nc_subgraphs_habitat, main = "Total amount of habitat in each subgraph")
+
+# identify the best solution
+solution_index <- which.max(nc_subgraphs_habitat)
+print(solution_index)
+
+# add column to county data indicating if county is selected in the solution
+nc$solution <- seq_len(nrow(nc)) %in%
+               V(nc_subgraphs[[solution_index]])$id
+
+# print counties in solution
+print(nc$NAME[nc$solution])
+
+# plot solution
+plot(nc[, "solution"], main = "Counties in solution",
+     col = ifelse(nc$solution, "#bae4b3", "#071E22"))
+```
+
+Since we might also be interested in near-optimal solutions, we could visualize the top fifty solutions.
+
+```{r a2, fig.show="animate", fig.width=4, fig.height=4, cache=FALSE, interval=0.5, aniopts="loop,autoplay,controls"}
+solution_order <- order(nc_subgraphs_habitat, decreasing = TRUE)
+for (i in seq_len(50)) {
+  plot(nc[, "solution"],
+       col = ifelse(seq_len(nrow(nc)) %in%
+                    V(nc_subgraphs[[solution_order[i]]])$id,
+                    "#bae4b3", "#071E22"),
+       main = paste0("Solution ", i, " (",
+                     round(((max(nc_subgraphs_habitat) -
+                             nc_subgraphs_habitat[solution_order[i]]) /
+                            max(nc_subgraphs_habitat)) * 100, 3),
+                     "% from optimality)"))
+}
+```
+
+## Benchmark
+
+Now that I have convinced you that the function _might actually work_ and _might actually be useful_, let's see how well it scales for different sized graphs. In other words, can this function identify all possible contiguous subgraphs that contain a set number of nodes for really large graphs (e.g. 100'000 nodes)? Here we will find out using a benchmark analysis. Specifically, we will generate multiple graphs containing different numbers of nodes and then record how long it takes the function to find all subgraphs that contain five nodes in each of these parent graphs. Please note that if this was a _real study_, I would perform replicate runs to show that these timings did not arise due to chance---for instance due to background processes on my computer---however, dear reader, I do not feel like waiting for an hour for this rmarkdown file to compile on my laptop. If you would like a publication quality analysis, I would highly encourage you to increase the `iterations` argument in the code below to a number that you deem appropriate and run the code yourself.
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+# specify node sizes for different sized graphs
+number_nodes_in_benchmark_graphs <- c(1e+1, 1e+2, 1e+3)
+
+# create different sized graphs and store them in a named list
+benchmark_graphs <- lapply(number_nodes_in_benchmark_graphs, function(x) {
+  induced_subgraph(make_lattice(rep(ceiling(sqrt(x)), 2)), seq_len(x))
+})
+names(benchmark_graphs) <- formatC(as.integer(number_nodes_in_benchmark_graphs),
+                                   big.mark = "")
+
+# run benchmark analysis
+benchmark_results <- bench::press(
+  x = names(benchmark_graphs),
+  bench::mark(iterations = 1, find_subgraphs(benchmark_graphs[[x]], 5)))
+```
+
+Now that we've run the benchmark analysis, let's visualize the results!
+
+```{r}
+# make plot with benchmark results
+p <- benchmark_results %>%
+     mutate(x = as.character(x), y = as.numeric(median)) %>%
+     group_by(x) %>%
+     summarize(y = mean(y)) %>%
+     ungroup() %>%
+     mutate(x = as.numeric(x)) %>%
+     ggplot(aes(x = x, y = y)) +
+     geom_point() +
+     geom_line() +
+     xlab("Graph size") +
+     ylab("Run time (seconds)") +
+     scale_x_log10() +
+     ggtitle("Benchmark results")
+
+# render plot
+print(p)
+```
+
+# Conclusions
+
+Hopefully I've convinced you this problem is solvable and interesting. But there is still more work to do! I'm hoping to generalize this function so instead of using a threshold number of nodes, we could use a threshold based on node attributes (e.g. each node might have an attribute correspond to habitat amount and we might want to set the threshold using a total amount of habitat). Also, the function doesn't scale well when there are millions of different subgraphs because it involves writing all the graphs to disk in a standard text format. So future work might involve writing it using a compressed format or interfacing with Python to copy the results via memory using the [reticulate R package ](https://github.com/rstudio/reticulate) and the [gremlin-python Python package](https://pypi.org/project/gremlinpython/).
+
+```{r}
+knitr::knit_exit()
+```
