@@ -7,6 +7,9 @@
 gremlin-subgraphs/lc.gz.tif
 gremlin-subgraphs/lc.tif
 
+# rsconnet
+*rsconnect*
+
 # R profile files
 *.Rproj.user
 *.Rhistory
