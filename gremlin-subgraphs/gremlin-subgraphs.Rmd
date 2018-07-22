@@ -1,5 +1,5 @@
 ---
-title: "Generating subgraphs in R"
+title: "Subgraphs in R using Gremlin"
 author: Jeffrey O. Hanson
 date: "`r format(Sys.time(), '%d %B %Y')`"
 output:
@@ -14,17 +14,15 @@ fontsize: 11pt
 knitr::opts_chunk$set(fig.align = "center")
 ```
 
-**This is still in progress.**
-
-## Introduction
+# Introduction
 
 Graphs---no, I don't mean plots---are used for representing network data. They are composed of nodes and edges. Nodes represent "things" and edges represent the connections between them. For example, consider a social network. Here, nodes might represent people and edges might delineate which people are connected to other people. But graphs can be so much more. They can be used to represent the spread of infectious diseases, predator-prey relationships in an ecosystem, or even consumer purchases in an online marketplace.
 
 Let us assume that---with no less of generality---I have convinced you that graphs are important. So, now we will consider a problem that you may encounter when manipulating a graph. You have a graph. This graph has an arbitrary number of nodes and an arbitrary number of edges. Now, you want all possible contiguous subgraphs---subsets of the graph that are connected---that contain a certain number of nodes. For example, you might have a graph with 25 nodes arranged in a grid with edges between adjacent nodes. Given this problem, you would like all possible contiguous subgraphs with five nodes. This problem specification is intentionally vague and thus precludes any solutions that involve known geometries of the subgraph.
 
-As you might have guessed, this is not an easy problem to solve. Previous work, [by the most excellent Benjamin Ortiz Ulloa tackled this problem by iterating over the desired number of nodes using a series of database joins](https://gist.github.com/beemyfriend/a2a721a3ab608418418afa0cc516e965). However, this solution does not scale well for graphs with thousands of nodes (anecdotally, a graph with 10'000 nodes arranged in a grid requires 30 minutes to complete). Therefore I sought another solution. My approach to solving computational problems generally involves finding algorithms or programs that have been developed by individuals much smarter than myself and applying them to my particular problem. Since Benjamin suggested that this type of problem could potentially be solved using [Apache Tinkerpop using the Gremlin graph traversal language](http://tinkerpop.apache.org/), I gave it a whirl. Here I show that we can find all subgraphs with 5 nodes in a graph containing 100'000 nodes in **under four minutes** by calling Apache Tinkerpop from within R.
+As you might have guessed, this is not an easy problem to solve. Previous work, [by the most excellent Benjamin Ortiz Ulloa tackled this problem by iterating over the desired number of nodes using a series of database joins](https://gist.github.com/beemyfriend/a2a721a3ab608418418afa0cc516e965). However, this solution does not scale well for graphs with thousands of nodes (anecdotally, a graph with 10'000 nodes arranged in a grid requires 30 minutes to complete). Therefore I sought another solution. My approach to solving computational problems generally involves finding algorithms or programs that have been developed by individuals much smarter than myself and applying them to my particular problem. Since Benjamin suggested that this type of problem could potentially be solved using [Apache Tinkerpop using the Gremlin graph traversal language](http://tinkerpop.apache.org/), I gave it a whirl. Here I show that we can find all subgraphs with 5 nodes in a graph containing 100'000 nodes in **under one minute** by calling Apache Tinkerpop from within R.
 
-## Methods
+# Methods
 
 Here we will use the [_igraph R_ package](http://igraph.org/r/) for manipulating graphs. Let's load this package and several other packages that will make our lives easier. Since we'll be making some animated gifs, we will also set some default behaviors when making gifs.
 
@@ -115,13 +113,13 @@ find_subgraphs <- function(x, number_nodes) {
 // read data
 graph = TinkerGraph.open()
 graph.io(graphml()).readGraph('", data_file, "')
+n = ", number_nodes,  "
 // create graph traversal
 g = graph.traversal()
 // save output
 new FileOutputStream('", result_file, "').withWriter{
-  f -> g.V().repeat(both().simplePath()).times(", number_nodes - 1, ").path().
-       local(unfold().values('id').order().fold()).dedup().
-       //filter(count(local).is(eq(", number_nodes, "))).
+  f -> g.V().repeat(both().simplePath()).times(n - 1).dedup().path().
+       local(unfold().values('id').order().fold()).
        sideEffect{f << \"${it}\"}.iterate()}
 "))
   ## run gremlin command
@@ -302,7 +300,8 @@ nc_subgraphs_habitat <- sapply(nc_subgraphs,
                                function(x) sum(V(x)$habitat_amount))
 
 # plot a histogram
-hist(nc_subgraphs_habitat, main = "Total amount of habitat in each subgraph")
+hist(nc_subgraphs_habitat, main = "",
+     xlab = "Total amount of habitat in each subgraph")
 
 # identify the best solution
 solution_index <- which.max(nc_subgraphs_habitat)
@@ -343,7 +342,7 @@ Now that I have convinced you that the function _might actually work_ and _might
 
 ```{r, results = "hide", message = FALSE, warning = FALSE}
 # specify node sizes for different sized graphs
-number_nodes_in_benchmark_graphs <- c(1e+1, 1e+2, 1e+3)
+number_nodes_in_benchmark_graphs <- c(1e+1, 1e+2, 1e+3, 1e+4, 1e+5)
 
 # create different sized graphs and store them in a named list
 benchmark_graphs <- lapply(number_nodes_in_benchmark_graphs, function(x) {
@@ -373,8 +372,7 @@ p <- benchmark_results %>%
      geom_line() +
      xlab("Graph size") +
      ylab("Run time (seconds)") +
-     scale_x_log10() +
-     ggtitle("Benchmark results")
+     scale_x_log10(labels = scales::comma)
 
 # render plot
 print(p)
@@ -382,8 +380,8 @@ print(p)
 
 # Conclusions
 
-Hopefully I've convinced you this problem is solvable and interesting. But there is still more work to do! I'm hoping to generalize this function so instead of using a threshold number of nodes, we could use a threshold based on node attributes (e.g. each node might have an attribute correspond to habitat amount and we might want to set the threshold using a total amount of habitat). Also, the function doesn't scale well when there are millions of different subgraphs because it involves writing all the graphs to disk in a standard text format. So future work might involve writing it using a compressed format or interfacing with Python to copy the results via memory using the [reticulate R package ](https://github.com/rstudio/reticulate) and the [gremlin-python Python package](https://pypi.org/project/gremlinpython/).
+Hopefully I've convinced you this problem is not entirely trivial. But there is still more work to do! I'm hoping to generalize this function so instead of using a threshold number of nodes, we could use a threshold based on node attributes (e.g. each node might have an attribute correspond to habitat amount and we might want to set the threshold using a total amount of habitat). Also, the function doesn't scale well when there are millions of different subgraphs because it involves writing all the graphs to disk in a standard text format. So future work might involve writing it using a compressed format or interfacing with Python to copy the results via memory using the [reticulate R package ](https://github.com/rstudio/reticulate) and the [gremlin-python Python package](https://pypi.org/project/gremlinpython/).
 
-```{r}
+```{r, include = FALSE}
 knitr::knit_exit()
 ```
