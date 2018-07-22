@@ -11,6 +11,6 @@ doc:
 
 # to publish a document on Rpubs use the following command:
 # `make publish prj=folder`, e.g. `make publish prj=gremlin-subgraphs`
-publish: doc
+publish:
 	@cd $(prj) && \
-	R -e "title=markdown::yaml_front_matter('$(prj).Rmd')[['title']];rsconnect::rpubsUpload(title, '$(prj).html', '$(prj).Rmd')"
+	R -e "title=rmarkdown::yaml_front_matter('$(prj).Rmd')[['title']];rsconnect::rpubsUpload(title, '$(prj).html', '$(prj).Rmd')"
