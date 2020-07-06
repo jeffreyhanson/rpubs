@@ -1,0 +1,256 @@
+---
+title: "Stratified Prioritizations"
+author: Jeffrey O. Hanson
+output:
+  rmarkdown::html_document:
+    toc: true
+    fig_caption: true
+    self_contained: yes
+fontsize: 11pt
+documentclass: article
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(fig.align = "center")
+```
+
+## Introduction
+
+Conservation planning exercises often need to stratify priority areas across different governmental areas (e.g. counties, countries). For instance, although it may be more efficient to concentrate conservation priorities to a single governmental area, this may not be practical given real-world conservation constraints (e.g. funding availability). Here we will explore some approaches for generating spatial prioritizations that stratify (allocate) selected planning units across different areas (e.g. counties).
+
+## Set up
+
+First, we will load some R packages for this tutorial.
+
+```{r}
+# load packages
+library(prioritizr)
+library(raster)
+library(sf)
+library(dplyr)
+library(fasterize)
+```
+
+Next, we will load some planning unit and feature data. The planning units represent the different places that we could purchase for protected area establishment. Each planning unit has a protected area establishment cost (per `"cost"` column). Additionally, these planning units are organized into counties (per `"county"` column). **In this tutorial, we will assume that it is important for prioritizations to "balance" selected planning units across each of the counties. In other words, we do not want prioritizations that select "too many" planning units within any given county.** The features represent different species that we are interested in conserving, and the feature data indicate the presence (or absence) of each feature within each planning unit.
+
+```{r}
+# load data
+data(sim_pu_sf) # planning unit data
+data(sim_features) # feature data
+
+# add county data to planning unit data
+## here we just assign the counties by subdividing the study area into
+## equal sized grid cells, in real-world data the counties should be
+## assigned by spatially intersecting the planning unit data with
+## a spatial layer denoting the county borders
+data(sim_pu_raster)
+sim_pu_raster[] <- seq_len(ncell(sim_pu_raster))
+county_raster_data <- raster::aggregate(sim_pu_raster, fact = 5, fun = min)
+sim_pu_sf$county <-
+  sapply(raster::extract(county_raster_data, sim_pu_sf), min)
+sim_pu_sf$county <- match(sim_pu_sf$county, sort(unique(sim_pu_sf$county)))
+sim_pu_sf$county <- letters[sim_pu_sf$county]
+
+# preview planning unit data
+print(sim_pu_sf)
+
+# preview feature data
+print(sim_features)
+```
+
+After loading the data, let's visualize the data.
+
+```{r}
+# visualize planning unit cost data
+plot(sim_pu_sf[, "cost"], main = "cost")
+
+# visualize planning unit county data
+plot(sim_pu_sf[, "county"], main = "counties")
+
+# visualize feature data
+plot(sim_features)
+```
+
+## Baseline scenario
+
+To start off, let's keep things simple. Here we will generate a spatial prioritization that does not stratify selected planning units across the counties. In other words, this prioritization will represent our "baseline scenario". By comparing this prioritization to subsequent prioritizations -- that explicitly stratify the planning units across the counties -- we can see what effect stratifying planning units has on the solutions. Specifically, this prioritization will be generated following the minimum set formulation of the reserve selection problem and contain targets that require each feature to have 10% of its spatial distribution represented in the solution.
+
+```{r}
+# build baseline problem
+p1 <-
+  problem(sim_pu_sf, sim_features, cost_column = "cost") %>%
+  add_min_set_objective() %>%
+  add_relative_targets(0.1) %>%
+  add_binary_decisions() %>%
+  add_default_solver(verbose = FALSE)
+
+# solve problem to generate baseline prioritization
+s1 <- solve(p1)
+
+# visualize solution
+plot(s1[, "solution_1"])
+```
+
+By comparing this map to the previous map showing the different counties, we can see that this solution selects many planning units in located in counties "C" and counties "D". Indeed, we can calculate how many planning units were selected in each county.
+
+```{r}
+# calculate how many planning units selected in each county
+s1_county_results <-
+  s1 %>%
+  st_drop_geometry() %>%
+  group_by(county) %>%
+  summarize(n_selected = sum(solution_1)) %>%
+  ungroup()
+
+# print result
+print(s1_county_results)
+```
+
+Therefore, we can see that this baseline scenario does not produce a prioritization that is "useful" given the context of this tutorial. So what can we do?
+
+## Minimum allocation constraints
+
+One approach to obtain prioritizations that select planning units that are stratified across the counties is to add constraints that specify the minimum number of selected planning units per county. In other words, we can add constraints to the reserve selection procedure that force the solution to have at least a certain amount of planning units selected within each county.
+
+To achieve this, we need to prepare the county data as extra "features" so that we can add constraints to the problem that relate to the county data. Since our feature data are in raster format, the county data need to be converted to raster format. Here, each county layer will indicate proportion of each planning unit that is covered by each county. Note that all the all proportions with either be 0% or 100% because our planning units match up with the feature grids.
+
+```{r}
+# create a raster stack containing a layer for each county
+county_data <- fasterize(sim_pu_sf, sim_features[[1]], background = 0,
+                        by = "county")
+
+# plot county raster data
+plot(county_data)
+
+# create new feature data object with the species data and the county data
+sim_features2 <- raster::addLayer(sim_features, county_data)
+
+# plot new feature data
+plot(sim_features2)
+```
+
+Now we can create a prioritization using these data. Similar to the baseline scenario, this prioritization will be generated following the minimum set formulation of the reserve selection problem and contain targets that require each feature to have 10% of its spatial distribution represented in the solution. It will also contain constraints to ensure that each county has _at least_ three planning units selected in the prioritization.
+
+```{r}
+# create targets,
+# for more information on what this means, see ?add_manual_targets
+p2_target_data <-
+  tibble(
+    feature = names(sim_features2),
+    type = c(rep("relative", nlayers(sim_features)),
+             rep("absolute", nlayers(county_data))),
+    sense = c(rep(">=", nlayers(sim_features)),
+              rep(">=", nlayers(county_data))),
+    target = c(rep(0.1, nlayers(sim_features)),
+               rep(3, nlayers(county_data))))
+
+# build minimum allocation constraints problem
+p2 <-
+  problem(sim_pu_sf, sim_features2, cost_column = "cost") %>%
+  add_min_set_objective() %>%
+  add_manual_targets(p2_target_data) %>%
+  add_binary_decisions() %>%
+  add_default_solver(verbose = FALSE)
+
+# solve problem to generate prioritization
+s2 <- solve(p2)
+
+# visualize solution
+plot(s2[, "solution_1"])
+```
+
+Now let's calculate the number of planning units selected within each county.
+
+```{r}
+# calculate how many planning units selected in each county
+s2_county_results <-
+  s2 %>%
+  st_drop_geometry() %>%
+  group_by(county) %>%
+  summarize(n_selected = sum(solution_1)) %>%
+  ungroup()
+
+# print result
+print(s2_county_results)
+```
+
+We can see that each county has at least three planning units selected within it. If we use this strategy, then we need to be careful what threshold we use (i.e. how many selected planning units per county, in this case 3), because if we set the threshold too high then we might end up selecting extra planning units that aren't strictly needed to reach the features' targets. Let's calculate the cost of this solution (i.e. `s2`), and compare its cost to that of the baseline scenario (i.e. `s1`).
+
+```{r}
+# calculate s1 cost
+s1_cost <- sum(s1$cost * s1$solution_1, na.rm = TRUE)
+print(s1_cost)
+
+# calculate s2 cost
+s2_cost <- sum(s2$cost * s2$solution_1, na.rm = TRUE)
+print(s2_cost)
+```
+
+We can see that adding these constraints slightly increases the cost of the solution -- so the solution is probably fairly efficient. You could further explore the efficiency analysis by conducting irreplacebility analyses (see `?irreplaceability`). But there is another approach we could employ that is less sensitive to our choice of threshold.
+
+## Maximum allocation constraints
+
+A different approach would involve setting constraints with specify the maximum -- not the minimum -- amount of planning units that could be selected per county within the solution. This approach has an advantage over the previous approach because it would not select extra planning units that are not needed to reach the features' targets.
+
+Now let's create a prioritization using this approach. Similar to the baseline scenario, this prioritization will be generated following the minimum set formulation of the reserve selection problem and contain targets that require each feature to have 10% of its spatial distribution represented in the solution. It will also contain constraints to ensure that each county has _at most_ (not "at least") three planning units selected in the prioritization.
+
+```{r}
+# create targets,
+# for more information on what this means, see ?add_manual_targets
+p3_target_data <-
+  tibble(
+    feature = names(sim_features2),
+    type = c(rep("relative", nlayers(sim_features)),
+             rep("absolute", nlayers(county_data))),
+    sense = c(rep(">=", nlayers(sim_features)),
+              rep("<=", nlayers(county_data))),
+    target = c(rep(0.1, nlayers(sim_features)),
+               rep(3, nlayers(county_data))))
+
+# build minimum allocation constraints problem
+p3 <-
+  problem(sim_pu_sf, sim_features2, cost_column = "cost") %>%
+  add_min_set_objective() %>%
+  add_manual_targets(p3_target_data) %>%
+  add_binary_decisions() %>%
+  add_default_solver(verbose = FALSE)
+
+# solve problem to generate prioritization
+s3 <- solve(p3)
+
+# visualize solution
+plot(s3[, "solution_1"])
+```
+
+Now let's calculate the number of planning units selected within each county.
+
+```{r}
+# calculate how many planning units selected in each county
+s3_county_results <-
+  s3 %>%
+  st_drop_geometry() %>%
+  group_by(county) %>%
+  summarize(n_selected = sum(solution_1)) %>%
+  ungroup()
+
+# print result
+print(s3_county_results)
+```
+
+We can see that each county has _at most_ three planning units selected within it. When compared to the previous prioritization (i.e. `s2`), this prioritization selected fewer planning units in county TODO, suggesting that the extra planning units selected in the previous prioritization were not very efficient. We can also calculate the cost of the new prioritization to confirm this.
+
+```{r}
+# calculate s3 cost
+s3_cost <- sum(s3$cost * s3$solution_1, na.rm = TRUE)
+print(s3_cost)
+```
+
+As we can see, the cost of this new prioritization (i.e. `s3`) is cheaper than that of the previous prioritization (i.e. `s2`) . It is worth noting that the cost of this new prioritization (i.e. `s3`) is still more expensive than the baseline scenario (i.e. `s1`) because we have added constraints that prevent the solution from selecting too many planning units in each county---even if it would be more efficient to do so.
+
+## Session information
+
+Information on my system and R environment for reproducibility.
+
+```{r}
+sessionInfo()
+```
