@@ -6,6 +6,8 @@
 # data
 gremlin-subgraphs/lc.gz.tif
 gremlin-subgraphs/lc.tif
+gremlin-subgraphs2/lc.gz.tif
+gremlin-subgraphs2/lc.tif
 
 # rsconnet
 *rsconnect*
@@ -21,10 +23,8 @@ gurobi.log
 .directory
 
 # cache
-data/intermediate/*
-data/final/results.rda
-code/rmarkdown/figures_files/*
-code/rmarkdown/supporting_information_files/*
+*.png
+*.webm
 
 # do not ignore the following files
 !.gitkeep

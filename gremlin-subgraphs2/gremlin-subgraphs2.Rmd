@@ -1,0 +1,603 @@
+---
+title: "More adventures with R and Gremlin"
+author: Jeffrey O. Hanson
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    toc: false
+    fig_caption: yes
+    self_contained: yes
+fontsize: 11pt
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(fig.align = "center")
+```
+
+# Introduction
+
+This document is a follow up to ["Subgraphs in R using Gremlin"](https://rpubs.com/jeffreyhanson/gremlim-subgraphs). Earlier, we looked at ways to extract all possible connected subgraphs from a graph that contain a set number of nodes using [Apache Tinkerpop and the Gremlin graph traversal language](http://tinkerpop.apache.org/). Here I aim to generalize this functionality by extracting a set of subgraphs from a graph that are associated with node attributes that exceed a target threshold. This set should also be constructed such that no single subgraph is a complete subset of another subgraph in the set (e.g. given the graph `a->b->c->d`, if our set of subgraphs contains `a->b` and `b->c` it cannot also contain `a->b->c`). We will also see if we can improve performance using Python to interface with Apache Tinkpop (using the [reticulate R package ](https://github.com/rstudio/reticulate) and the [gremlin-python Python package](https://pypi.org/project/gremlinpython/)).
+
+# Methods
+
+As before, we will use the [_igraph R_ package](http://igraph.org/r/) for manipulating graphs. Let's load this package along with several other packages to make our lives easier. We will use these packages to wrangle data, perform benchmarks, and visualize data.
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+# load packages
+library(dplyr)          # dat pipe operator and manipulate tabular data
+library(igraph)         # manipulate graph data
+library(assertthat)     # validate data
+library(animation)      # make pretty animations
+library(bench)          # perform benchmark analysis
+library(reticulate)     # execute python commands
+library(ggplot2)        # create pretty plots
+library(ggraph)         # create pretty plots of graphs
+```
+
+Since we will be using Gremlin server to perform for the graph processing and this program can be tricky to setup, we will use Docker containers to handle the installation for us. We also require the `gremlin-python` and `future` Python packages to be installed. They can be installed on Ubuntu systems using the following system commands.
+
+```{bash, eval = FALSE}
+sudo pip install future
+sudo pip install gremlin-python==3.3.3
+```
+
+To make sure that we have properly installed Docker and Python, we will define some convenience functions below that we can use to verify this.
+
+```{r}
+#' Gremlin console script
+#'
+#' This function returns the file name to call the Gremlin console.
+#'
+#' @return \code{character} name of file.
+gremlin_console <- function() {
+  ext <- ifelse(.Platform$OS.type == "unix", "sh", "bat")
+  paste0("gremlin.", ext)
+}
+
+#' Is Gremlin installed?
+#'
+#' This function determines if Gremlin is installed on a computer.
+#'
+#' @return \code{logical} indicating if Gremlin is installed.
+is_gremlin_installed <- function() {
+  !inherits(system(paste0(gremlin_console(), " --version"), intern = TRUE),
+                          "try-error")
+}
+
+#' Is Docker installed?
+#'
+#' Check if Docker is installed and accessible from the command line interface.
+#'
+#' @return \code{logical} indicating if Docker is indeed installed.
+is_docker_installed <- function() {
+  !inherits(system("docker -v", intern = TRUE), "try-error")
+}
+
+#' Is Python installed?
+#'
+#' Check if Python is installed and accessible from the command line interface.
+#'
+#' @return \code{logical} indicating if Python is indeed installed.
+is_python_installed <- function() {
+  library(reticulate)
+  reticulate::py_config()
+  reticulate::py_available() &&
+  reticulate::py_module_available("gremlin_python")
+}
+```
+
+We can test if Docker and Python are installed on your computer by running the following commands in your R session.
+
+```{r}
+is_gremlin_installed()
+is_python_installed()
+is_docker_installed()
+```
+
+Now we will define a function to construct a set of subgraphs from a parent graph that are associated with node attributes which exceed a target threshold (noting that this set must also contain subgraphs that are not subsets of other subgraphs in the set).
+
+```{r}
+#' Subgraphs
+#'
+#' Find contiguous subgraphs that meet a threshold calculated using
+#' the sum of node attributes. For example, given a graph where
+#' nodes correspond to counties and edges indicate that counties are
+#' adjacent to each other, find contiguous sets of adjacent counties that
+#' have an area larger than 50 km^2.
+#'
+#' @param x \code{\link[igraph]{igraph}} object.
+#'
+#' @param attribute_name \code{character} node attribute to use for determining
+#'   if the subgraphs meeting the the threshold.
+#'
+#' @param attribute_threshold \code{numeric} threshold for subgraphs.
+#'
+#' @param use_python \code{logical} should the Python interface to Gremlin
+#'   Server be used for processing? Defaults to \code{TRUE}.
+#'
+#' @details Please note that this function requires Python 2.7 and Docker
+#'   to be installed and accessible from the command line. It also requires
+#'   a suitable Internet connection for downloading a Docker image from
+#'   Dockerhub to use Gremlin server
+#'   (\url{https://hub.docker.com/r/bricaud/gremlin-server}).
+#'
+#' @return \code{list} of \code{\link[igraph]{igraph}} objects.
+find_subgraphs <- function(x, attribute_name, attribute_threshold,
+                           use_python = TRUE) {
+  # validate arguments
+  assertthat::assert_that(inherits(x, "igraph"),
+                          assertthat::is.string(attribute_name),
+                          assertthat::noNA(attribute_name),
+                          !is.null(igraph::vertex_attr(x, attribute_name)),
+                          is.numeric(igraph::vertex_attr(x, attribute_name)),
+                          assertthat::noNA(igraph::vertex_attr(x,
+                                                               attribute_name)),
+                          assertthat::is.scalar(attribute_threshold),
+                          is.finite(attribute_threshold),
+                          sum(igraph::vertex_attr(x, attribute_name)) >=
+                            attribute_threshold,
+                          igraph::vcount(x) > 0,
+                          assertthat::is.flag(use_python),
+                          is_python_installed(),
+                          is_docker_installed())
+  # create helper c++ function to remove super-sets from solutions
+  cpp11 <- inline::getPlugin("Rcpp")
+  cpp11$env$PKG_CXXFLAGS <- "-std=c++11"
+  remove_supersets <- inline::cxxfunction(signature(z = "list"),
+                                          settings = cpp11,
+                                          body = "
+  // [[Rcpp::plugins(cpp11)]]
+  // initialization
+  Rcpp::List x = Rcpp::as<Rcpp::List>(z);
+  std::size_t n = x.size();
+  Rcpp::IntegerVector curr_solution;
+  std::vector<Rcpp::IntegerVector> data(n);
+  std::vector<std::size_t> indices(n);
+  std::size_t n_remove = 0;
+  std::size_t n_equal;
+  // preliminary processing to ingest data
+  for (std::size_t i = 0; i < n; ++i)
+    data[i] = Rcpp::as<Rcpp::IntegerVector>(x[i]);
+  // sort the IntegerVectors in data according to size so that IntegerVectors
+  // with less elements occur at the beginning of data
+  std::sort(data.begin(), data.end(), [&](const Rcpp::IntegerVector & a,
+                                          const Rcpp::IntegerVector & b){
+                                            return a.size() < b.size();});
+  // main processing
+  std::size_t i = 0;
+  while (i < n) {
+    // find IntegerVectors in data to remove
+    n_remove = 0;
+    // loop over remaining elements data (as data[j])
+    for (std::size_t j = i; j < n; ++j) {
+      // if the j'th remaining element has more elements that the i'th
+      // element then inspect it to see if it is a super set
+      if (data[j].size() > data[i].size()) {
+        n_equal = 0;
+        // for each remaining element in data find out if it contains all
+        // the elements in data[i]
+        for (std::size_t k = 0; k < data[i].size(); ++k)
+          n_equal += static_cast<std::size_t>(std::find(data[j].begin(),
+                                                       data[j].end(),
+                                                       data[i][k]) !=
+                                              data[j].end());
+        // if data[j] contains all the elements in data[i] then append j
+        // to the elements that should be removed
+        if (n_equal == data[i].size()) {
+          indices[n_remove] = j;
+          ++n_remove;
+        }
+      }
+    }
+    // remove the IntegerVectors from data
+    for (std::size_t j = 0; j < n_remove; ++j)
+      data.erase(data.begin() + indices[j]);
+    // update variables controlling loop
+    n = data.size();
+    ++i;
+  }
+  return(Rcpp::wrap(data));
+  ")
+  # create temporary files
+  data_file <- tempfile(fileext = ".xml")
+  cmd_file <- tempfile(fileext = ifelse(use_python, ".py", ".txt"))
+  # add id attribute
+  igraph::V(x)$id <- seq_len(igraph::vcount(x))
+  # extract subgraph with nodes less than threshold
+  sg <- igraph::induced_subgraph(x, igraph::vertex_attr(x, attribute_name) <
+                                     attribute_threshold)
+  # sink subgraph with nodes that are less than threshold to to file
+  igraph::write_graph(sg, data_file, "graphml")
+  # main processing
+  if (use_python) {
+    ## sink Python script to file
+    cat(file = cmd_file, paste0("
+# import dependencies
+from gremlin_python import statics
+from gremlin_python.structure.graph import Graph
+from gremlin_python.process.graph_traversal import __
+from gremlin_python.process.strategies import *
+from gremlin_python.driver import client
+from gremlin_python.driver.driver_remote_connection import DriverRemoteConnection
+statics.load_statics(globals())
+# ingest data into Gremlin server
+cl = client.Client('ws://localhost:8182/gremlin', 'g')
+result = cl.submit('graph = TinkerGraph.open();graph.io(graphml()).readGraph(\\'/tmp/data.json\\');g = graph.traversal();g.V().repeat(both().simplePath()).until(local(path().unfold().values(\\'", attribute_name, "\\').sum().is(gte(", attribute_threshold, ")))).dedup().path().local(unfold().values(\\'id\\').order().fold()).dedup()').all().result()
+cl.close()
+"))
+    ## run Gremlin command in Python via the reticulate R package
+    ## note this requires the pip "gremlin-python" and "future" Python libraries
+    results <- NULL
+    tryCatch({
+      system(paste("docker run --name=grm -p 8182:8182",
+                   "-dt 'bricaud/gremlin-server:3.3.3'"), intern = TRUE)
+      system(paste("docker cp", data_file, "grm:/tmp/data.json"), intern = TRUE)
+      Sys.sleep(10)
+      results <- reticulate::py_run_file(cmd_file)$result
+    }, finally = {
+      try(system(paste0("docker stop -t 1 grm"), intern = TRUE), silent = TRUE)
+      try(system(paste0("docker rm grm"), intern = TRUE), silent = TRUE)
+    })
+    ## verify that gremlin query was successful
+    if (is.null(results))
+      stop("processing Gremlin query failed.")
+  } else {
+    ## create more temporary files
+    result_file <- tempfile(fileext = ".txt")
+    ## save Gremlin commands in a file
+    cat(file = cmd_file, paste0("
+// read data
+graph = TinkerGraph.open()
+graph.io(graphml()).readGraph('", data_file, "')
+// create graph traversal
+g = graph.traversal()
+// save output
+new FileOutputStream('", result_file, "').withWriter{
+  f -> g.V().repeat(both().simplePath()).
+       until(local(path().unfold().values('", attribute_name, "').
+             sum().is(gte(", attribute_threshold, ")))).
+       dedup().
+       path().
+       local(unfold().values('id').order().fold()).
+       dedup().
+       sideEffect{f << \"${it}\"}.iterate()}
+"))
+    ## run gremlin command
+    system(paste(gremlin_console(), "-e", cmd_file))
+    assertthat::assert_that(file.exists(result_file),
+                            msg = "running Gremlin query failed.")
+    ## load results from file
+    results <- suppressWarnings(readLines(result_file)) # read raw output
+    if (nchar(results) == 0 || results == "[]")
+      stop("no valid subgraphs")
+    ## parse results
+    results <- substr(results, 2,
+                      nchar(results) - 1)
+    results <- gsub(" ", "", results, fixed = TRUE)
+    results <- strsplit(results, "][", fixed = TRUE)[[1]]
+    results <- lapply(results,
+                      function(x) as.numeric(strsplit(x, ",",
+                                                      fixed = TRUE)[[1]]))
+    ## delete temporary files
+    unlink(cmd_file)
+    unlink(result_file)
+  }
+  ## delete temporary files
+  unlink(data_file)
+  ## remove subgraphs in results that are completely contained within the
+  ## other subgraphs in the results
+  results <- remove_supersets(results)
+  ## return results
+  append(
+    lapply(which(igraph::vertex_attr(x, attribute_name) >= attribute_threshold),
+           igraph::induced_subgraph, graph = x),
+    unname(lapply(results, igraph::induced_subgraph, graph = x)))
+}
+```
+
+# Results
+
+## Verification
+
+```{r}
+# create graph
+g <- graph_from_edgelist(matrix(c(1, rep(seq(2, 8), each = 2), 9), ncol = 2,
+                                byrow = TRUE))
+V(g)$value <- c(100, 1, 50, 50, 1, 30, 40, 40, 1)
+V(g)$id <- seq_len(9)
+
+# print graph
+print(g)
+
+# plot graph
+ggraph(g, layout = "manual",
+       node.positions = data.frame(x = seq_len(vcount(g)), y = 0)) +
+geom_edge_fan() +
+geom_node_point(aes(color = value), size = 15) +
+geom_node_text(aes(label = id), color = "white") +
+theme_graph()
+```
+
+```{r, result = "hide", message = FALSE}
+# find subgraphs
+sg <- find_subgraphs(g, "value", 100)
+
+# print node indices in subgraphs
+sapply(sg, function(x) paste(vertex_attr(x, "id"), collapse = "->"))
+```
+
+```{r a1, fig.show="animate", fig.width=10, fig.height=2.5, interval=0.5, aniopts="loop,autoplay,controls"}
+for (i in seq_along(sg)) {
+  V(g)$Status <- ifelse(seq_len(vcount(g)) %in% V(sg[[i]])$id,
+                        "selected", "omitted")
+  p <- ggraph(g, layout = "manual",
+         node.positions = data.frame(x = seq_len(vcount(g)), y = 0)) +
+      geom_edge_fan() +
+      geom_node_point(aes(color = Status), size = 15) +
+      theme_graph() +
+      scale_color_manual(values = c("selected" = "#bae4b3",
+                                    "omitted" = "#071E22")) +
+      ggtitle(paste0("Subgraphs with total node value >= 100 (", i, "/",
+                     length(sg), ")"))
+  print(p)
+}
+```
+
+## Contrived case-study
+
+By this point you might be wondering if this function is actually useful. So let's try our hand at solving a **real world problem** (tm). Similar to the contrived case-study in the previous document, let's say you were in charge of managing threatened species in North Carolina. Currently, you are tasked with deciding where to introduce captive bred populations of a threatened species. You have one hundred counties to choose from and you need to identify a set of counties that contains 5 % of all the habitat in the counties as a target threshold. This problem is further complicated by the fact that (1) each county has a different amount of suitable habitat for the threatened species, and (2) you need to select counties that form a single contiguous unit---that is they all form a single connected mass---to maintain connectivity between reintroduced populations. Since larger counties are associated with increased management costs, the optimal solution will be the set of counties with the smallest combined total area. If you have read the previous document then this problem will seem very familiar to the problem we explored in the previous document, but here we need to extract subgraphs that meet a target threshold calculated using the nodes' attributes rather than simply subgraphs that contain a set number of nodes. **Please note that this example is provided purely for teaching purposes and threatened species conservation is actually far more complex then presented here and this work should not be used to guide any real-world conservation activities.**
+
+Now, you could choose to express this as an integer programming problem (perhaps using the [`<div class="shameless-self-plug">prioritizr R package</div>`](https://prioritizr.net)) and solve it---but you would need access to a commercial integer programming problem solver which would cost you about $10'000 because in this scenario you are not affiliated with a university. So here we will try using Apache Tinkerpop instead because it is freely available. To solve this problem, we will first load packages for working with spatial data and import the data delineating the extent of each county.
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+# load packages for case-study
+library(sf)          # manipulating spatial vector data
+library(raster)      # manipulating spatial raster data
+library(fasterize)   # quickly rasterize spatial vector data
+
+# load North Carolina county data
+nc <- system.file("shape/nc.shp", package = "sf") %>%
+      read_sf() %>%
+      st_transform(3785) # reproject to mercator
+```
+
+```{r}
+# plot county borders
+plot(st_geometry(nc), col = "grey20", main = "North Carolina counties")
+```
+
+Now we will download some land cover data so we can determine how much suitable habitat is available in each county for our pretend threatened species. To make our lives easier, we will just use a pre-compiled land cover data set provided by the Global Land Cover Facility. Here each pixel value corresponds to a different land cover class.
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+# download land cover data if doesn't exist
+# see Global Land Cover Facility for more info: http://glcf.umd.edu/data/lc/
+if (!file.exists("lc.tif")) {
+  download.file(paste0("ftp://ftp.glcf.umd.edu/glcf/Global_LNDCVR/UMD_TILES/",
+                       "Version_5.1/2012.01.01/MCD12Q1_V51_LC1.2012.TS1718/",
+                       "MCD12Q1_V51_LC1.2012.TS1718.tif.gz"), "lc.tif.gz")
+  # decompress data
+  R.utils::gunzip("lc.tif.gz")
+}
+```
+
+```{r}
+# load land cover data
+lc_data <- raster("lc.tif")
+
+# crop land cover data to study area
+lc_data <- crop(lc_data, nc %>%
+                         as("Spatial") %>%
+                         spTransform(lc_data@crs) %>%
+                         extent())
+
+# project land cover data to mercator
+lc_data <- projectRaster(lc_data, crs = CRS("+init=epsg:3785"), method = "ngb")
+
+# plot land cover data
+plot(lc_data, main = "Land cover data",
+     addfun = function() {plot(as(nc, "Spatial"), add = TRUE)})
+```
+
+After downloading the data, we will reclassify the data to binary values indicating which areas contain suitable habitat for our pretend threatened species.
+
+```{r}
+# manually reclassify land cover data to binary values indicating habitat
+habitat_data <- Which(lc_data >= 1 & lc_data <= 11, na.rm = FALSE)
+
+# plot habitat data
+plot(habitat_data, main = "Suitable habitat",
+     addfun = function() {plot(as(nc, "Spatial"), add = TRUE)})
+```
+
+Next we will calculate the total amount of suitable habitat in each county.
+
+```{r}
+# calculate total amount of habitat in each county in North Carolina in 2012
+# note that we use fasterize to speed up calculations
+nc$habitat_amount <- sapply(seq_len(nrow(nc)),
+                            function(i) cellStats(fasterize(nc[i, ],
+                                                            habitat_data) *
+                                                  habitat_data,
+                                                  "sum"))
+
+# now we will express the amount in m^2
+nc$habitat_amount <- nc$habitat_amount * prod(res(habitat_data))
+
+# plot amount of habitat in each county
+plot(nc[, "habitat_amount"], main = "Amount of habitat")
+
+# calculate the target amount of habitat required in m^2
+habitat_target <- sum(nc$habitat_amount) * 0.05
+
+# print habitat target
+print(habitat_target)
+```
+
+Now that we have assembled the data we can begin solving the problem using graphs. First, we will create showing which counties are adjacent to each other. Here nodes will represent counties and edges will represent which counties are adjacent to each other.
+
+```{r, results = "hide", message = FALSE, warning = FALSE, fig.width = 6, fig.height = 2}
+# make graph using county data
+nc_graph <- graph_from_adjacency_matrix(as.matrix(st_touches(nc)))
+V(nc_graph)$name <- nc$NAME
+V(nc_graph)$habitat_amount <- nc$habitat_amount
+V(nc_graph)$county_area <- as.numeric(st_area(nc))
+
+# calculate centroids for plotting graphs
+nc_centroids <- nc %>%
+                st_centroid() %>%
+                as("Spatial") %>%
+                slot("coords") %>%
+                as.data.frame() %>%
+                setNames(c("x", "y"))
+```
+
+```{r}
+# make plot of graph with nodes colored according to amount of habitat
+ggraph(nc_graph, layout = "manual", node.positions = nc_centroids) +
+geom_edge_fan() +
+geom_node_point(aes(color = habitat_amount), size = 3.5) +
+labs(color = "Habitat amount") +
+theme_graph()
+```
+
+```{r}
+# make plot of graph with nodes colored according to county area
+ggraph(nc_graph, layout = "manual", node.positions = nc_centroids) +
+geom_edge_fan() +
+geom_node_point(aes(color = county_area), size = 3.5) +
+labs(color = "County area") +
+theme_graph()
+```
+
+Next we can use the `find_subgraphs` function to find possible combinations of counties that meet a target amount of habitat and are all connected to each other.
+
+```{r}
+# find all contiguous subgraphs with five nodes
+nc_subgraphs <- find_subgraphs(nc_graph, "habitat_amount", habitat_target)
+```
+
+Before we progress any further, let's take this opportunity to double check that each of our subgraphs are associated with counties that meet our 5 % habitat target.
+
+```{r}
+# calculate total habitat associated with the counties in each subgraph
+nc_subgraphs_total_habitat <- sapply(nc_subgraphs,
+                                     function(x) sum(V(x)$habitat_amount))
+
+# calculate total habitat associated with the counties in each subgraph
+nc_subgraphs_percentage_habitat <- (nc_subgraphs_total_habitat /
+                                    sum(nc$habitat_amount)) * 100
+
+# plot a histogram
+hist(nc_subgraphs_percentage_habitat, main = "", xlim = c(0, 100),
+     xlab = "Percentage of total habitat in each subgraph (%)")
+lines(c(5, 5), c(-200, 200), col = "red", lty = "dashed")
+```
+
+Now that we have identified contiguous subgraphs that meet the habitat target threshold, we can calculate the total combined area of the counties associated with each subgraph as a proxy for management cost.
+
+```{r}
+# calculate total area associated with the counties in each subgraph
+nc_subgraphs_total_area <- sapply(nc_subgraphs,
+                                  function(x) sum(V(x)$county_area))
+
+# plot a histogram
+hist(nc_subgraphs_total_area, main = "",
+     xlab = "Total area of each set of counties (m^2)")
+
+# identify the best solution
+solution_index <- which.max(nc_subgraphs_total_area)
+print(solution_index)
+
+# print total area associated with the counties in the solution
+print(nc_subgraphs_total_area[solution_index])
+
+# add column to county data indicating if county is selected in the solution
+nc$solution <- seq_len(nrow(nc)) %in%
+               V(nc_subgraphs[[solution_index]])$id
+
+# print counties in solution
+print(nc$NAME[nc$solution])
+
+# plot optimal solution
+plot(nc[, "solution"], main = "Optimal solution",
+     col = ifelse(nc$solution, "#bae4b3", "#071E22"))
+```
+
+Since we might also be interested in near-optimal solutions, we could visualize the top fifty solutions.
+
+```{r a2, fig.show="animate", fig.width=10, fig.height=4, cache=FALSE, interval=0.5, aniopts="loop,autoplay,controls"}
+# find animation order for the subgraphs
+subgraph_order <- order(nc_subgraphs_total_area)
+
+# calculate optimality gap for each subgraph
+subgraph_optimality <- ((nc_subgraphs_total_area -
+                         min(nc_subgraphs_total_area)) /
+                       min(nc_subgraphs_total_area))
+
+# create the animation frames
+for (i in seq_len(50)) {
+  plot(nc[, "solution"],
+       col = ifelse(seq_len(nrow(nc)) %in%
+                    V(nc_subgraphs[[subgraph_order[i]]])$id,
+                    "#bae4b3", "#071E22"),
+       main = paste0("Solution ", i, " (",
+                     round(subgraph_optimality[i] * 100, 3),
+                     "% from optimality)"))
+}
+```
+
+## Benchmark
+
+Finally, let's run a quick benchmark analysis to see (1) how long it takes for this function to solve different sized problems and (2) how these timings differ when we use the Python interface or call Gremlin from the command line. Please note that if this was a _real study_, I would perform replicate runs to show that these timings did not arise due to chance---for instance due to background processes on my computer---however, dear reader, I do not feel like waiting for an hour for this rmarkdown file to compile on my laptop. If you would like a publication quality analysis, I would highly encourage you to increase the `iterations` argument in the code below to a number that you deem appropriate and run the code yourself.
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+# specify node sizes for different sized graphs
+number_nodes_in_benchmark_graphs <- c(1e+1, 5e+1, 5e+2)
+
+# create different sized graphs and store them in a named list
+benchmark_graphs <- lapply(number_nodes_in_benchmark_graphs, function(x) {
+  x <- induced_subgraph(make_lattice(rep(ceiling(sqrt(x)), 2)), seq_len(x))
+  V(x)$value <- 1
+  x
+})
+names(benchmark_graphs) <- formatC(as.integer(number_nodes_in_benchmark_graphs),
+                                   big.mark = "")
+
+# run benchmark analysis
+benchmark_results <- bench::press(
+  x = names(benchmark_graphs),
+  use_python = c(FALSE, TRUE),
+  bench::mark(iterations = 1,
+              find_subgraphs(benchmark_graphs[[x]], "value",
+                             max(2, ceiling(vcount(benchmark_graphs[[x]]) *
+                                    0.05)), use_python)))
+```
+
+Now that we've run the benchmark analysis, let's visualize the results!
+
+```{r}
+# make plot with benchmark results
+p <- benchmark_results %>%
+     mutate(x = as.character(x), y = as.numeric(median),
+            interface = if_else(use_python, "Python", "Command Line")) %>%
+     group_by(x, interface) %>%
+     summarize(y = mean(y)) %>%
+     ungroup() %>%
+     mutate(x = as.numeric(x)) %>%
+     ggplot(aes(x = x, y = y, color = interface)) +
+     geom_point() +
+     geom_line() +
+     xlab("Graph size") +
+     ylab("Run time (seconds)") +
+     labs(color = "Interface") +
+     scale_x_log10(labels = scales::comma)
+
+# render plot
+print(p)
+```
+
+# Conclusions
+
+```{r, include = FALSE}
+knitr::knit_exit()
+```

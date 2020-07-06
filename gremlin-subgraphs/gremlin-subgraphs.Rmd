@@ -354,7 +354,8 @@ names(benchmark_graphs) <- formatC(as.integer(number_nodes_in_benchmark_graphs),
 # run benchmark analysis
 benchmark_results <- bench::press(
   x = names(benchmark_graphs),
-  bench::mark(iterations = 1, find_subgraphs(benchmark_graphs[[x]], 5)))
+  bench::mark(iterations = 1, find_subgraphs(benchmark_graphs[[x]],
+              ceiling(vcount(benchmark_graphs[[x]]) * 0.11))))
 ```
 
 Now that we've run the benchmark analysis, let's visualize the results!
