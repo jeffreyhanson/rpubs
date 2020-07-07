@@ -22,7 +22,7 @@ Conservation planning exercises often need to stratify priority areas across dif
 
 First, we will load some R packages for this tutorial.
 
-```{r}
+```{r, message = FALSE}
 # load packages
 library(prioritizr)
 library(raster)
@@ -60,13 +60,17 @@ print(sim_features)
 
 After loading the data, let's visualize the data.
 
-```{r}
+```{r, fig.height = 4, fig.width = 4}
 # visualize planning unit cost data
 plot(sim_pu_sf[, "cost"], main = "cost")
+```
 
+```{r, fig.height = 4, fig.width = 4}
 # visualize planning unit county data
 plot(sim_pu_sf[, "county"], main = "counties")
+```
 
+```{r, fig.height = 4, fig.width = 8}
 # visualize feature data
 plot(sim_features)
 ```
@@ -86,7 +90,9 @@ p1 <-
 
 # solve problem to generate baseline prioritization
 s1 <- solve(p1)
+```
 
+```{r, fig.height = 4, fig.width = 4}
 # visualize solution
 plot(s1[, "solution_1"])
 ```
@@ -112,16 +118,18 @@ Therefore, we can see that this baseline scenario does not produce a prioritizat
 
 One approach to obtain prioritizations that select planning units that are stratified across the counties is to add constraints that specify the minimum number of selected planning units per county. In other words, we can add constraints to the reserve selection procedure that force the solution to have at least a certain amount of planning units selected within each county.
 
-To achieve this, we need to prepare the county data as extra "features" so that we can add constraints to the problem that relate to the county data. Since our feature data are in raster format, the county data need to be converted to raster format. Here, each county layer will indicate proportion of each planning unit that is covered by each county. Note that all the all proportions with either be 0% or 100% because our planning units match up with the feature grids.
+To achieve this, we need to prepare the county data as extra "features" so that we can add constraints to the problem that relate to the county data. Since our feature data are in raster format, the county data need to be converted to raster format. Here, each county layer will indicate proportion of each planning unit that is covered by each county. Note that all the all proportions with either be 0% or 100% because our planning units match up perfectly with the feature grid cells.
 
-```{r}
+```{r, fig.height = 4, fig.width = 4}
 # create a raster stack containing a layer for each county
 county_data <- fasterize(sim_pu_sf, sim_features[[1]], background = 0,
                         by = "county")
 
 # plot county raster data
 plot(county_data)
+```
 
+```{r, fig.height = 4, fig.width = 8}
 # create new feature data object with the species data and the county data
 sim_features2 <- raster::addLayer(sim_features, county_data)
 
@@ -144,6 +152,9 @@ p2_target_data <-
     target = c(rep(0.1, nlayers(sim_features)),
                rep(3, nlayers(county_data))))
 
+# print target data
+print(p2_target_data)
+
 # build minimum allocation constraints problem
 p2 <-
   problem(sim_pu_sf, sim_features2, cost_column = "cost") %>%
@@ -154,7 +165,9 @@ p2 <-
 
 # solve problem to generate prioritization
 s2 <- solve(p2)
+```
 
+```{r, fig.height = 4, fig.width = 4}
 # visualize solution
 plot(s2[, "solution_1"])
 ```
@@ -174,7 +187,7 @@ s2_county_results <-
 print(s2_county_results)
 ```
 
-We can see that each county has at least three planning units selected within it. If we use this strategy, then we need to be careful what threshold we use (i.e. how many selected planning units per county, in this case 3), because if we set the threshold too high then we might end up selecting extra planning units that aren't strictly needed to reach the features' targets. Let's calculate the cost of this solution (i.e. `s2`), and compare its cost to that of the baseline scenario (i.e. `s1`).
+We can see that each county has at least three planning units selected within it. If we use this strategy, then we need to be careful what threshold we use (i.e. how many selected planning units per county, in this example it was 3 planning units), because if we set the threshold too high then we might end up selecting extra planning units that aren't needed to reach the features' targets. Let's calculate the cost of this solution (i.e. `s2`), and compare its cost to that of the baseline scenario (i.e. `s1`).
 
 ```{r}
 # calculate s1 cost
@@ -186,7 +199,7 @@ s2_cost <- sum(s2$cost * s2$solution_1, na.rm = TRUE)
 print(s2_cost)
 ```
 
-We can see that adding these constraints slightly increases the cost of the solution -- so the solution is probably fairly efficient. You could further explore the efficiency analysis by conducting irreplacebility analyses (see `?irreplaceability`). But there is another approach we could employ that is less sensitive to our choice of threshold.
+We can see that adding these constraints increases the cost of the solution by a fair amount -- so the solution is probably not highly efficient. You could further explore the efficiency by conducting an irreplacebility analysis (see `?irreplaceability`). But there is another approach we could employ that is less sensitive to our choice of threshold.
 
 ## Maximum allocation constraints
 
@@ -207,6 +220,9 @@ p3_target_data <-
     target = c(rep(0.1, nlayers(sim_features)),
                rep(3, nlayers(county_data))))
 
+# print target data
+print(p3_target_data)
+
 # build minimum allocation constraints problem
 p3 <-
   problem(sim_pu_sf, sim_features2, cost_column = "cost") %>%
@@ -217,7 +233,9 @@ p3 <-
 
 # solve problem to generate prioritization
 s3 <- solve(p3)
+```
 
+```{r, fig.height = 4, fig.width = 4}
 # visualize solution
 plot(s3[, "solution_1"])
 ```
@@ -237,7 +255,7 @@ s3_county_results <-
 print(s3_county_results)
 ```
 
-We can see that each county has _at most_ three planning units selected within it. When compared to the previous prioritization (i.e. `s2`), this prioritization selected fewer planning units in county TODO, suggesting that the extra planning units selected in the previous prioritization were not very efficient. We can also calculate the cost of the new prioritization to confirm this.
+We can see that each county has _at most_ three planning units selected within it. When compared to the previous prioritization (i.e. `s2`), this prioritization selected fewer planning units in county B, suggesting that the extra planning units selected in the previous prioritization were not very efficient. We can also calculate the cost of the new prioritization to confirm this.
 
 ```{r}
 # calculate s3 cost
