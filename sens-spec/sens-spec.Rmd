@@ -1,0 +1,521 @@
+---
+title: "Sensitivity and specificity with imperfect data"
+author: Jeffrey O. Hanson
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  rmarkdown::html_document:
+    toc: false
+    fig_caption: yes
+    self_contained: yes
+fontsize: 11pt
+bibliography: references.bib
+csl: reference-style.csl
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(fig.align = "center")
+```
+
+# Introduction
+
+Biodiversity is in crisis. Since existing biodiversity data are incomplete, conservation plans often need to be informed by species distribution models. Using detection and non-detection data from ecological surveys (often termed "presence-absence data"), conservation practitioners can fit species distribution models to predict the spatial distribution of threatened species. These models, in turn, can then be used to prioritize places for conservation management. As a consequence, it is critical that species distribution models have high predictive performance---otherwise conservation plans may fail to site management actions in places that will enhance the long-term persistence of biodiversity.
+
+The performance of species distribution models are often evaluated by comparing their predictions to a reference ecological survey dataset. To achieve this, a _confusion matrix_ can be used to summarize the agreement and disagreement between the models' predictions and the reference dataset. From this confusion matrix, various statistics can be calculated to evaluate the performance of the model. For example, the _sensitivity statistic_ describes the proportion of detections in a reference ecological survey dataset that are correctly predicted by a species distribution model. Additionally, the _specificity statistic_ describes the proportion of non-detections in an ecological survey dataset that are correctly predicted by a species distribution model. Furthermore, the _Tue Skill Statistic (TSS)_ combines the sensitivity and specificity statistics to evaluate overall model performance. These statistics are often calculated using cross-validation techniques to account for over-fitting. However, reference datasets are often imperfect.
+
+Ecological survey datasets do not provide perfect information on the presence (or absence) of species [@r3]. For example, an ecologist might visit a site, observe an organism, identify which species the organism belongs to, and record the species as present at the site (i.e. they detected a certain species at a certain site). However, this detection record could be a false-positive if they did not correctly identify which species the organism belongs to. Similarly, an ecologist might visit a site, fail to observe any organisms belonging to a certain species, and record the species as absent from the site. However, this non-detection record could be a false-negative if the species is actually present at the site and the ecologist simply did not observe it. Similar to species distribution models, the performance of an ecological survey technique can also be described using sensitivity and specificity statistics [@r2]. If the sensitivity and specificity of the ecological survey technique that produced a reference ecological dataset is known, then they can be used to refine estimates of the sensitivity and specificity of a species distribution model [e.g. @r2].
+
+Before we detail calculations for accounting for imperfect detection, let us first detail the "naive" calculations that assume perfect detection. In other words, how would we estimate the sensitivity and specificity of a model assuming that we had perfect reference data? To achieve this, we will need to adopt some mathematical terminology. Given a confusion matrix, let $a$, $b$, $c$, and $d$ denote different cells in the matrix (below).
+
+```{r, echo = FALSE}
+cmx <- data.frame(v1 = c("(a)", "(b)"), v2 = c("(c)", "(d)"),
+                  row.names = c("model predicted presence",
+                                "model predicted absence"))
+knitr::kable(
+  cmx, align = c("c", "c"),
+  col.names = c("species detected in reference data",
+                 "species not detected in reference data"))
+```
+
+Here, $a$ denotes the number of true positives (top left cell), $b$ the number of false negatives (bottom left cell), $c$ the number of false positives (top right cell), and $d$ the number of true negatives (bottom right cell). Also, let $n$ denote the total number of observations (i.e. $n = a + b + c + d$). Now, let ${S'}_N$ and ${SP'}_N$ denote the "naive" sensitivity and specificity of the model (i.e. values calculated assuming that the reference data are perfect).
+
+$$
+{S'}_N = \frac{a}{a + b} \\
+{SP'}_N = \frac{d}{c + d}
+$$
+
+One approach for calculating the "true" sensitivity and specificity of a species distribution model---given imperfect ecological survey data with known sensitivity and specificity statistics---was outlined by Foody [-@r2]. This approach is based on a method outlined by Staquet _et al._ [-@r4] for evaluating medical tests (and so shall be referred to, hereafter, as the Staquet method). It should be noted that this method can fail under certain conditions [see section 11.3.1; @r1] and provide invalid estimates (e.g. negative sensitivity values or values greater than one, see below). To calculate this, let $S_R$ and ${SP}_R$ denote the true sensitivity and specificity (respectively) of the reference dataset. Also, let ${S'}_S$ and ${SP'}_S$ denote the estimates for a model's true sensitivity and specificity (respectively) following the Staquet method:
+
+$$
+{S'}_S = \frac{(a + c) \times {SP}_R - c}{(n \times ({SP}_R - 1)) + (a + b)} \\
+{SP'}_S = \frac{(b + d) \times S_R - b}{n \times S_R - (a + b)}
+$$
+
+A second approach, also outlined by Staquet _et al._ [-@r4], uses maximum likelihood to directly estimate the true sensitivity and specificity for a model (hereafter, referred to as the maximum likelihood method). Let ${S'}_M$ and ${SP'}_M$ denote the estimates for a model's true sensitivity and specificity (respectively) following this method:
+
+$$
+\text{max}_{ {S'}_M, {SP'}_M, \pi} \\
+\{ (S_R \times {S'}_M \times \pi)  + ((1 - {SP}_R) \times (1 - {SP'}_S) \times (1 - \pi)) \}^{a} \times \\
+\{ (S_R \times (1 - {S'}_M) \times \pi) + ((1 - {SP}_R) \times {SP'}_S \times (1 - \pi)) \}^{b} \times \\
+\{ ((1 - S_R) \times {S'}_M \times \pi) + ({SP}_R \times (1 - {SP'}_S) \times (1 - \pi)) \}^{c} \times \\
+\{ ((1 - S_R) \times (1 - {S'}_M) \times \pi) + ({SP}_R \times {SP'}_S \times (1 - \pi)) \}^{d} \times \\
+$$
+
+A third approach is outlined by the user jlimahaverford on the Cross-Validated website [hereafter, referred to as the Haverford method; @r5]. Let ${S'_H}$ and ${SP'_H}$ denote the estimates for a model's sensitivity and specificity (respectively) following the Haverford method:
+
+$$
+{S'}_H = ({S'}_N S_R) + ((1 - {SP'_N}) (1 - S_R)) \\
+{SP'}_H = ({SP'}_N {SP}_R) + ((1 - {S'}_N) (1 - {SP}_R))
+$$
+
+Here, we will examine the three approaches for estimating the true sensitivity and specificity of species distribution models whilst accounting for the fact that the reference dataset is imperfect. Specifically, we will simulate confusion matrices that represent the agreement (and disagreement) between a species distribution model and a reference ecological survey dataset. These confusion matrices will be simulated with known sensitivity and specificity values for both the model and the reference data, and we will then apply the three approaches to estimate the known sensitivity and specificity values for the species distribution model. If these approaches work, they should produce estimates that are identical to the parameters used to simulate the data.
+
+# Methods
+
+Our analyses will be conducted using the R statistical computing environment. Before we begin our analysis, we will load some R packages to make our lives easier.
+
+```{r, message = FALSE}
+library(assertthat)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gridExtra)
+library(viridis)
+library(nloptr)
+```
+
+### Preliminary analyses
+
+We will define some R functions to help conduct our analysis. First, we will define a function to simulate a confusion matrix given the following parameters: (`n`) the total number of detection and non-detection records, (`p`) the prevalence of the study species (i.e. proportion of sites truly occupied by the species), (`reference_sensitivity`) the known ("true") sensitivity of the ecological survey technique used to generate the reference data, (`reference_specificity`) the known ("true") specificity of the ecological survey technique used to generate the reference data, (`test_sensitivity`) the known ("true") sensitivity of the species distribution model being tested, and (`test_specificity`) the known ("true") sensitivity of the species distribution model being tested.
+
+```{r}
+simulate_confusion_matrix <- function(
+  n, p, reference_sensitivity, reference_specificity, test_sensitivity,
+  test_specificity) {
+  # assert that arguments are valid
+  assert_that(is.count(n), is.number(p), p >= 0, p <= 1,
+    is.number(reference_sensitivity), is.number(reference_specificity),
+    reference_sensitivity >= 0, reference_sensitivity <= 1,
+    reference_specificity >= 0, reference_specificity <= 1,
+    is.number(test_sensitivity), is.number(test_specificity),
+    test_sensitivity >= 0, test_specificity <= 1,
+    test_sensitivity >= 0, test_specificity <= 1)
+  # rename variables to follow Staquet (eqns 1--4)
+  x <- n * p
+  y <- n * (1 - p)
+  sr <- reference_sensitivity
+  sn <- test_sensitivity
+  spr <- reference_specificity
+  spn <- test_specificity
+  ma <- (x * sr * sn) + (y * (1 - spn) * (1 - spr))
+  mb <- (x * (1 - sn) * sr) + (y * spn * (1 - spr))
+  mc <- (x * sn * (1 - sr)) + (y * spr * (1 - spn))
+  md <- (x * (1 - sr) * (1 - sn)) + (y * spr * spn)
+  # create confusion matrix following Staquet
+  cm <- matrix(c(ma, mb, mc, md), ncol = 2,
+         dimnames = list(
+           c("test_presence", "test_absence"),
+           c("reference_presence", "reference_absence")))
+  # round values in matrix
+  cm[] <- round(cm)
+  # check for valid values
+  assert_that(all(c(cm) >= 0), sum(cm) >= (0.9 * n), sum(cm) <= (1.1 * n))
+  # return matrix
+  cm
+}
+```
+
+Let's use this function to simulate some confusion matrices to verify that it gives sensible results.
+
+```{r}
+# simulate confusion matrix where species has a 50% prevalence, and
+# both reference data and model have high sensitivity and specificity values
+simulate_confusion_matrix(
+  n = 1000, p = 0.5,
+  reference_sensitivity = 0.9, reference_specificity = 0.9,
+  test_sensitivity = 0.89, test_specificity = 0.89)
+
+# simulate confusion matrix where species has a 10% prevalence, and
+# both reference data and model have high sensitivity and specificity values
+simulate_confusion_matrix(
+  n = 1000, p = 0.1,
+  reference_sensitivity = 0.9, reference_specificity = 0.9,
+  test_sensitivity = 0.89,  test_specificity = 0.89)
+
+# simulate confusion matrix where species has a 10% prevalence,
+# the reference data has high sensitivity and specificity, and the model
+# has low high sensitivity and specificity
+simulate_confusion_matrix(
+  n = 1000, p = 0.1,
+  reference_sensitivity = 0.9, reference_specificity = 0.9,
+  test_sensitivity = 0.6, test_specificity = 0.6)
+
+# simulate confusion matrix where species has a 10% prevalence,
+# and both the reference data and model have low sensitivity and specificity
+simulate_confusion_matrix(
+  n = 1000, p = 0.1,
+  reference_sensitivity = 0.7, reference_specificity = 0.7,
+  test_sensitivity = 0.6, test_specificity = 0.6)
+```
+
+We can see that these confusion matrices look sensible. When the model sensitivity is similar to the reference data sensitivity, the confusion matrix has reports a (relatively) high agreement in the true positives (upper left cell). Similar, when the model specificity is similar to the reference data specificity, the confusion matrix reports a (relatively) high agreement in the true negatives (bottom right cell). Next, we will define functions for estimating a model's sensitivity and specificity following the three approaches. These functions both have the same parameters: (`x`) a confusion matrix, (`reference_sensitivity`) the known ("true") sensitivity of the ecological survey technique used to generate the reference data, and (`reference_specificity`) the known ("true") specificity of the ecological survey technique used to generate the reference data.
+
+```{r}
+staquet_performance <- function(
+  x, reference_sensitivity, reference_specificity) {
+  # assert that arguments are valid
+  assert_that(is.matrix(x), ncol(x) == 2, nrow(x) == 2,
+    is.number(reference_sensitivity), is.number(reference_specificity),
+    reference_sensitivity >= 0, reference_sensitivity <= 1,
+    reference_specificity >= 0, reference_specificity <= 1)
+  # rename variables to follow Staquet (eqns 1--9)
+  a <- x[1, 1]
+  b <- x[2, 1]
+  c <- x[1, 2]
+  d <- x[2, 2]
+  n <- a + b + c + d
+  s1r <- reference_sensitivity
+  s2r <- reference_specificity
+  # estimate correct sensitivity and specificity
+  cor_sens <- ceiling(((a + c) * s2r) - c) / ceiling((n * (s2r - 1)) + (a + b))
+  cor_spec <- ceiling(((b + d) * s1r) - b) / ceiling((n * s1r) - (a + b))
+  # return result
+  c(sensitivity = cor_sens, specificity = cor_spec)
+}
+
+haverford_performance <- function(
+  x, reference_sensitivity, reference_specificity) {
+  # assert that arguments are valid
+  assert_that(is.matrix(x), ncol(x) == 2, nrow(x) == 2,
+    is.number(reference_sensitivity), is.number(reference_specificity),
+    reference_sensitivity >= 0, reference_sensitivity <= 1,
+    reference_specificity >= 0, reference_specificity <= 1)
+  # calculate naive estimates for sensitivity and specificity
+  # (assuming that reference data are perfect)
+  naive_sens <- x[1, 1] / sum(x[, 1])
+  naive_spec <- x[2, 2] / sum(x[, 2])
+  # apply a correction to these naive estimates based on the
+  # known sensitivity and specificity of the reference data
+  cor_sens <- (naive_sens * reference_sensitivity) +
+              ((1 - naive_spec) * (1 - reference_sensitivity))
+  cor_spec <- (naive_spec * reference_specificity) +
+              ((1 - naive_sens) * (1 - reference_specificity))
+  # return result
+  c(sensitivity = cor_sens, specificity = cor_spec)
+}
+
+maxlik_performance <- function(
+  x, reference_sensitivity, reference_specificity) {
+  # assert that arguments are valid
+  assert_that(is.matrix(x), ncol(x) == 2, nrow(x) == 2,
+    is.number(reference_sensitivity), is.number(reference_specificity),
+    reference_sensitivity >= 0, reference_sensitivity <= 1,
+    reference_specificity >= 0, reference_specificity <= 1)
+  # redefine variables to follow source
+  seR <- reference_sensitivity
+  spR <- reference_specificity
+  s00 <- x[2, 2]
+  s10 <- x[2, 1]
+  s01 <- x[1, 2]
+  s11 <- x[1, 1]
+  # define maximum likelihood function
+  f <- function(x) {
+    prec <- 1e+4 # precision for calculations
+    seT <- x[1]
+    spT <- x[2]
+    Pi <- x[3]
+    t1 <- (seR * seT * Pi) + ((1 - spR) * (1 - spT) * (1 - Pi))
+    t2 <- (seR * (1 - seT) * Pi) + ((1 - spR) * spT * (1 - Pi))
+    t3 <- ((1 - seR) * seT * Pi) + (spR * (1 - spT) * (1 - Pi))
+    t4 <- ((1 - seR) * (1 - seT) * Pi) + (spR * spT * (1 - Pi))
+    # calculate negative log likelihood
+    # use Rmpfr package to account for really small numbers in calculations
+    -as.numeric(sum(log(c(Rmpfr::mpfr(t1, prec) ^ Rmpfr::mpfr(s11, prec),
+                          Rmpfr::mpfr(t2, prec) ^ Rmpfr::mpfr(s10, prec),
+                          Rmpfr::mpfr(t3, prec) ^ Rmpfr::mpfr(s01, prec),
+                          Rmpfr::mpfr(t4, prec) ^ Rmpfr::mpfr(s00, prec)))))
+  }
+  # estimate test sensitivity and specificity by minimizing negative loglik,
+  # note that we constrain the parameter values to be >0 and <1 to avoid
+  # issues with log(0)
+  res <- nloptr::bobyqa(c(0.9, 0.9, 0.5), f,
+                        lower = rep(1e-5, 3), upper = rep(1 - 1e-5, 3))
+  # return result
+  c(sensitivity = res$par[[1]], specificity = res$par[[2]])
+}
+```
+
+### Example 1
+
+Let's see if these methods give similar estimates in a worked example (originally published in in Foody [-@r2]).
+
+```{r}
+# create confusion matrix
+conf_matrix <- matrix(c(120, 180, 220, 480), ncol = 2, nrow = 2,
+                      dimnames = list(
+                        c("test_presence", "test_absence"),
+                        c("reference_presence", "reference_absence")))
+print(conf_matrix)
+
+# define reference sensitivity and specificity
+ref_sens <- 0.75
+ref_spec <- 0.75
+
+# estimate model sensitivity and specificity using Staquet method
+staquet_performance(conf_matrix, ref_sens, ref_spec)
+
+# estimate model sensitivity and specificity using Haverford method
+haverford_performance(conf_matrix, ref_sens, ref_spec)
+
+# estimate model sensitivity and specificity using maximum likelihood method
+maxlik_performance(conf_matrix, ref_sens, ref_spec)
+```
+
+We can see that both the Staquet and maximum likelihood methods correctly estimate the model's true sensitivity and specificity. Whereas, the Haverford method does not. This simple example only considers a very specific set of parameters, we should explore a range of parameters to be confident that these approaches work in general.
+
+### Simulation study 1: Estimating model sensitivity
+
+Here we will examine the performance of the three approaches for estimating the true sensitivity of the model. To conduct this analysis, we will simulate the data using parameters that reflect my biodiversity data. I am dealing with rare plant species, and so we will use a low prevalence value to reflect this (i.e. 10%). We will also use a published estimate for the "true" sensitivity of plant surveys [@r3]. Since botanists have very low false-positive rates [@r6], we will (arbitrarily) assume a very high "true" specificity for the plant surveys.
+
+```{r}
+# set parameters for simulation
+number_obs <- 1000
+prevalence <- 0.1
+ref_sens <- 0.77
+ref_spec <- 0.999
+test_sens <- seq(0, 1, length.out = 100)
+test_spec <- 0.9
+
+# simulate confusion matrices
+sens_cm <- lapply(test_sens, simulate_confusion_matrix, n = number_obs,
+  p = prevalence, reference_sensitivity = ref_sens,
+  reference_specificity = ref_spec, test_specificity = test_spec)
+
+# calculate corrected sensitivity and specificity using Staquet method
+sens_staquet_results <- sapply(sens_cm, staquet_performance,
+  reference_sensitivity = ref_sens, reference_specificity = ref_spec)
+
+# calculate corrected sensitivity and specificity using Haverford method
+sens_haverford_results <- sapply(sens_cm, haverford_performance,
+  reference_sensitivity = ref_sens, reference_specificity = ref_spec)
+
+# calculate corrected sensitivity and specificity using max likelihood method
+sens_maxlik_results <- sapply(sens_cm, maxlik_performance,
+  reference_sensitivity = ref_sens, reference_specificity = ref_spec)
+
+# compile results
+sens_results <-
+  rbind(sens_staquet_results, sens_haverford_results, sens_maxlik_results)  %>%
+  t() %>%
+  as.data.frame() %>%
+  setNames(c("staquet_sensitivity", "staquet_specificity",
+             "haverford_sensitivity", "haverford_specificity",
+             "maxlik_sensitivity", "maxlik_specificity")) %>%
+  mutate(true_sensitivity = test_sens)
+
+# plot estimates of sensitivity
+p1 <-
+  ggplot(sens_results,
+         aes(x = true_sensitivity, y = staquet_sensitivity)) +
+  geom_line() +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "blue", linetype = "dashed") +
+  ylab("Staquet method for estimating test sensitivity") +
+  xlab("True test sensitivity") +
+  coord_cartesian(ylim = c(0, 1), xlim = c(0, 1))
+p2 <-
+  ggplot(sens_results,
+         aes(x = true_sensitivity, y = haverford_sensitivity)) +
+  geom_line() +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "blue", linetype = "dashed") +
+  ylab("Haverford method for estimating test sensitivity") +
+  xlab("True test sensitivity") +
+  coord_cartesian(ylim = c(0, 1), xlim = c(0, 1))
+p3 <-
+  ggplot(sens_results,
+         aes(x = true_sensitivity, y = maxlik_sensitivity)) +
+  geom_line() +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "blue", linetype = "dashed") +
+  ylab("Maximum likelihood method for estimating test sensitivity") +
+  xlab("True test sensitivity") +
+  coord_cartesian(ylim = c(0, 1), xlim = c(0, 1))
+grid.arrange(p1, p2, p3, nrow = 1)
+```
+
+We can see that both the Staquet and maximum likelihood methods still produce correct estimates of the model's true sensitivity and specificity (i.e. because the points are along the blue line). Whereas, the Haverford method generally underestimates the true sensitivity of the model (i.e. the points are below the blue line). These results suggest that the Haverford method may not be reliable for estimating the true sensitivity of a model.
+
+### Simulation study 2: Estimating model specificity
+
+Here we will examine the performance of the three approaches for estimating the true specificity of the model. Similar to before, we will use simulation parameters that reflect our ecological data.
+
+```{r}
+# set parameters for simulation
+number_obs <- 1000
+prevalence <- 0.1
+ref_sens <- 0.77
+ref_spec <- 0.999
+test_sens <- 0.75
+test_spec <- seq(0, 1, length.out = 100)
+
+# simulate confusion matrices
+spec_cm <- lapply(test_spec, simulate_confusion_matrix, n = number_obs,
+  p = prevalence, reference_sensitivity = ref_sens,
+  reference_specificity = ref_spec, test_sensitivity = test_sens)
+
+# calculate corrected sensitivity and specificity using Staquet method
+spec_staquet_results <- sapply(spec_cm, staquet_performance,
+  reference_sensitivity = ref_sens, reference_specificity = ref_spec)
+
+# calculate corrected sensitivity and specificity using Haverford method
+spec_haverford_results <- sapply(spec_cm, haverford_performance,
+  reference_sensitivity = ref_sens, reference_specificity = ref_spec)
+
+# calculate corrected sensitivity and specificity using max likelihood method
+spec_maxlik_results <- sapply(spec_cm, maxlik_performance,
+  reference_sensitivity = ref_sens, reference_specificity = ref_spec)
+
+# compile results
+spec_results <-
+  rbind(spec_staquet_results, spec_haverford_results, spec_maxlik_results)  %>%
+  t() %>%
+  as.data.frame() %>%
+  setNames(c("staquet_sensitivity", "staquet_specificity",
+             "haverford_sensitivity", "haverford_specificity",
+             "maxlik_sensitivity", "maxlik_specificity")) %>%
+  mutate(true_specificity = test_spec)
+
+# plot estimates of specificity
+p1 <-
+  ggplot(spec_results,
+         aes(x = true_specificity, y = staquet_specificity)) +
+  geom_line() +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "blue", linetype = "dashed") +
+  ylab("Staquet method estimate for estimating test specificity") +
+  xlab("True test specificity") +
+  coord_cartesian(ylim = c(0, 1), xlim = c(0, 1))
+p2 <-
+  ggplot(spec_results,
+         aes(x = true_specificity, y = haverford_specificity)) +
+  geom_line() +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "blue", linetype = "dashed") +
+  ylab("Haverford method for estimating test specificity") +
+  xlab("True test specificity") +
+  coord_cartesian(ylim = c(0, 1), xlim = c(0, 1))
+p3 <-
+  ggplot(spec_results,
+         aes(x = true_specificity, y = maxlik_specificity)) +
+  geom_line() +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "blue", linetype = "dashed") +
+  ylab("Maximum likelihood method for estimating test specificity") +
+  xlab("True test specificity") +
+  coord_cartesian(ylim = c(0, 1), xlim = c(0, 1))
+grid.arrange(p1, p2, p3, nrow = 1)
+```
+
+We can see that all three approaches give fairly similar estimates for specificity (given these simulation parameters). So, it would appear that the Haverford method could provide reliable estimates of the sensitivity of a model---but further simulation studies are needed to confirm this.
+
+### Example 2
+
+Let's also explore an additional example to verify the correctness of our calculations.
+
+```{r}
+# create confusion matrix
+conf_matrix <- matrix(c(1005, 134, 147, 1668), ncol = 2, nrow = 2,
+                      dimnames = list(
+                        c("test_presence", "test_absence"),
+                        c("reference_presence", "reference_absence")))
+print(conf_matrix)
+
+# define reference sensitivity and specificity
+ref_sens <- 0.98
+ref_spec <- 0.85
+
+# estimate model sensitivity and specificity using Staquet method
+staquet_performance(conf_matrix, ref_sens, ref_spec)
+
+# estimate model sensitivity and specificity using Haverford method
+haverford_performance(conf_matrix, ref_sens, ref_spec)
+
+# estimate model sensitivity and specificity using maximum likelihood method
+maxlik_performance(conf_matrix, ref_sens, ref_spec)
+```
+
+Here the Staquet method produces a number that is obviously invalid. Although the Haverford and maximum likelihood methods produce seemingly sensible answers, how can we be sure that they are correct? One explanation for the Staquet method failing is due to model identifiability issues---wherein multiple sensitivity and specificity values are equally likely. Let's see if this is happening? To achieve this, we will use a grid search method to evaluate the support for different parameters (i.e. log-likelihood) given different model sensitivity and specificity values.
+
+```{r, results = "hide"}
+# generate different combinations of parameters
+model_params <- expand.grid(model_sens = seq(1e-5, 1 - 1e-5, length.out = 25),
+                            model_spec = seq(1e-5, 1 - 1e-5, length.out = 25))
+
+# calculate log-likelihood for each parameter combination
+# (note this will take a while to run)
+model_params$loglik <-
+  plyr::laply(seq_len(nrow(model_params)), .progress = "text", function(i) {
+  # set parameters
+  seR <- ref_sens
+  spR <- ref_spec
+  seT <- model_params[[1]][[i]]
+  spT <- model_params[[2]][[i]]
+  s00 <- conf_matrix[2, 2]
+  s10 <- conf_matrix[2, 1]
+  s01 <- conf_matrix[1, 2]
+  s11 <- conf_matrix[1, 1]
+  # define maximum likelihood function
+  f <- function(x) {
+    prec <- 1e+4 # precision for calculations
+    Pi <- x[1]
+    t1 <- (seR * seT * Pi) + ((1 - spR) * (1 - spT) * (1 - Pi))
+    t2 <- (seR * (1 - seT) * Pi) + ((1 - spR) * spT * (1 - Pi))
+    t3 <- ((1 - seR) * seT * Pi) + (spR * (1 - spT) * (1 - Pi))
+    t4 <- ((1 - seR) * (1 - seT) * Pi) + (spR * spT * (1 - Pi))
+    # calculate negative log likelihood
+    # use Rmpfr package to account for really small numbers in calculations
+    -as.numeric(sum(log(c(Rmpfr::mpfr(t1, prec) ^ Rmpfr::mpfr(s11, prec),
+                          Rmpfr::mpfr(t2, prec) ^ Rmpfr::mpfr(s10, prec),
+                          Rmpfr::mpfr(t3, prec) ^ Rmpfr::mpfr(s01, prec),
+                          Rmpfr::mpfr(t4, prec) ^ Rmpfr::mpfr(s00, prec)))))
+  }
+  # find loglik for best supported prevalence given
+  # test sensitivity
+  res <- nloptr::bobyqa(c(0.5), f, lower = c(1e-5), upper = c(1 - 1e-5))
+  # return result (multiply by minus one to get log likelihood)
+  -1 * res$value
+})
+```
+
+```{r}
+# print best estimates using grid search method
+model_params %>%
+arrange(desc(loglik)) %>%
+head()
+
+# create plot
+ggplot(data = model_params,
+       aes(x = model_sens, y = model_spec, fill = loglik)) +
+geom_tile() +
+xlab("Estimate of model sensitivity") +
+xlab("Estimate of model specificity") +
+scale_fill_viridis("Log Likelihood") +
+theme(legend.position = "bottom", legend.key.width = unit(5,"cm"))
+```
+
+We can see that the best found estimate (first row) is fairly different from the next best estimate (second row)---remembering that these are on a log-scale---so I don't think we have any identifiability issues here?
+
+# Conclusion
+
+This small simulation study explores the performance of three different approaches for estimating the true sensitivity of a model. In all explored cases, the maximum likelihood method provided correct estimates. However, this method is also the most computationally expensive (i.e. it takes much longer to run). Therefore, the ideal approach might involve (1) estimating the model sensitivity and specificity using the Staquet approach first, and (2) if this method produces invalid estimates (i.e. values below zero or greater than one), use the maximum likelihood approach to correctly estimate the true sensitivity of the simulated model.
+
+# References
+
+<div id="refs"></div>
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
